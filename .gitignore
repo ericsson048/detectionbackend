@@ -11,3 +11,4 @@ __pycache__/
 /venv
 /Mpox2-1
 /Mpox2-2
+.env
