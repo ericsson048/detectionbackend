@@ -5,4 +5,9 @@ __pycache__/
 *.pyd
 .env
 *.log
-.DS_Store
+.DS_Storevenv/
+__pycache__/
+*.pyc
+/venv
+/Mpox2-1
+/Mpox2-2
