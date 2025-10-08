@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 import os
 import re
+from fastapi.middleware.cors import CORSMiddleware
+
 
 
 
@@ -81,6 +83,14 @@ def clean_markdown_for_mobile(text: str) -> str:
     
     return text.strip()
 
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ------------------- Users -------------------
 @app.post("/users/", response_model=schemas.UserOut)
@@ -212,3 +222,20 @@ def get_all_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
     """Récupère tous les utilisateurs (avec pagination)"""
     users = crud.get_users(db, skip=skip, limit=limit)
     return users
+
+
+@app.get("/")
+def read_root():
+    return {"status": "ok", "message": "API is running"}
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
