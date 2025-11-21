@@ -15,6 +15,7 @@ import google.generativeai as genai
 import os
 import re
 from fastapi.middleware.cors import CORSMiddleware
+from db_models import LoginRequest,AuthResponse
 
 
 
@@ -92,21 +93,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import jwt
+import datetime
+
+SECRET_KEY = "dantylanez et ericsson"  # à garder secret
+ALGORITHM = "HS256"             # algorithme de chiffrement
+
+def get_token(user):
+    """
+    Génère un JWT pour l'utilisateur donné.
+    `user` peut être un objet SQLAlchemy ou un dict contenant l'id.
+    """
+    payload = {
+        "userid": user.id,  # identifiant de l'utilisateur
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7)  # expiration dans 7 jours
+    }
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return token
+
+
 # ------------------- Users -------------------
-@app.post("/users/", response_model=schemas.UserOut)
+@app.post("/users/", response_model=AuthResponse)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = crud.get_user_by_username(db, user.username)
     if db_user:
         raise HTTPException(status_code=400, detail="Username already registered")
-    return crud.create_user(db, user)
+    user= crud.create_user(db, user)
+    return{
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email
+        },
+        "token": get_token(user)
+    }
 
 # ------------------- Login simple -------------------
-@app.post("/login/")
-def login(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
-    user = crud.get_user_by_username(db, username)
-    if not user or not auth.verify_password(password, user.hashed_password):
+
+@app.post("/login")
+def login(data: LoginRequest, db: Session = Depends(get_db)):
+    user = crud.get_user_by_username(db, data.username)
+
+    if not user or not auth.verify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"user_id": user.id, "username": user.username}
+
+    return {
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email
+        },
+        "token": get_token(user)  # ou ton vrai JWT si tu veux
+    }
+
 
 # ------------------- Prédiction -------------------
 @app.post("/predict/")

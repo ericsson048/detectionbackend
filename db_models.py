@@ -5,6 +5,22 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, LargeB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
+from pydantic import BaseModel
+
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserResponse
 
 class User(Base):
     __tablename__ = "users"
