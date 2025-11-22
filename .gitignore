@@ -12,4 +12,15 @@ __pycache__/
 Mpox2-1/
 Mpox2-2/
 .env
+
+
+data/
+
+
+main1.py
+detect.py
+TorchScript.py
+project_analysis.md
+best_mpox_model.pth
+
 skindetect/
