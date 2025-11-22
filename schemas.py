@@ -13,7 +13,7 @@ class UserOut(BaseModel):
     email: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class PredictionCreate(BaseModel):
     filename: str
@@ -28,4 +28,4 @@ class PredictionOut(PredictionCreate):
     user_id: int
 
     class Config:
-        orm_mode = True
+        from_attributes = True
