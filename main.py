@@ -7,6 +7,7 @@ import io
 import torch
 import torch.nn as nn
 from torchvision import models as torch_models, transforms  # Renommé pour éviter la confusion
+from huggingface_hub import hf_hub_download
 
 import database, db_models, schemas, crud, auth  # Retiré 'models' et ajouté 'db_models'
 
@@ -30,7 +31,22 @@ get_db = database.get_db
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = torch_models.resnet18(weights=None)  # Utilise torch_models au lieu de models
 model.fc = nn.Linear(model.fc.in_features, 6)
-model.load_state_dict(torch.load("best_mpox_model.pth", map_location=device))
+
+# Chargement depuis Hugging Face
+try:
+    print("Téléchargement du modèle depuis Hugging Face...")
+    model_path = hf_hub_download(repo_id="ericssonish/detectionbackend-mpox", filename="best_mpox_model.pth")
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    print(f"Modèle chargé depuis {model_path}")
+except Exception as e:
+    print(f"Erreur lors du chargement depuis HF, tentative locale... Erreur: {e}")
+    if os.path.exists("best_mpox_model.pth"):
+        model.load_state_dict(torch.load("best_mpox_model.pth", map_location=device))
+        print("Modèle chargé localement.")
+    else:
+        print("Impossible de charger le modèle.")
+        raise e
+
 model = model.to(device)
 model.eval()
 
