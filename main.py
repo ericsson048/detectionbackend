@@ -146,7 +146,7 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 # ------------------- Login simple -------------------
 
-@app.post("/login")
+@app.post("/login/")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = crud.get_user_by_username(db, data.username)
 
