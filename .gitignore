@@ -10,7 +10,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -36,6 +35,12 @@ venv.bak/
 data/
 Mpox2-1/
 Mpox2-2/
+
+#models
+skin_disease_model.tflite
+skin_disease_model.onnx
+best_mpox_model.pth
+mpox_vit_model.pth
 
 # Logs
 *.log
