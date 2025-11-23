@@ -222,6 +222,29 @@ def read_root():
 def health_check():
     return {"status": "healthy", "memory_usage": "< 200MB"}
 
+
+# ===== KEEP-ALIVE POUR RENDER =====
+import threading
+import time
+import requests
+
+def keep_alive():
+    """Ping l'API toutes les 2 minutes pour éviter la mise en veille (Render free)"""
+    while True:
+        try:
+            url = "https://detectionbackend-hln7.onrender.com"
+            if url:
+                print(f"🔄 Keep-alive ping vers {url}")
+                requests.get(url + "/health", timeout=2)
+        except Exception as e:
+            print(f"⚠️ Keep-alive error: {e}")
+        
+        time.sleep(120)  # 2 minutes
+
+# Lancer le keep-alive dans un thread séparé
+threading.Thread(target=keep_alive, daemon=True).start()
+
+
 # ===== DÉMARRAGE =====
 if __name__ == "__main__":
     import uvicorn
