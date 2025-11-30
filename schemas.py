@@ -22,8 +22,12 @@ class PredictionCreate(BaseModel):
     advice: str
     image: Optional[bytes] = None
 
-class PredictionOut(PredictionCreate):
+class PredictionOut(BaseModel):
     id: int
+    filename: str
+    prediction: str
+    confidence: float
+    advice: str
     timestamp: datetime
     user_id: int
 
