@@ -11,6 +11,8 @@ import google.generativeai as genai
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
 import datetime
+import time
+from functools import wraps
 
 # ===== IMPORTS SANS PyTorch =====
 import database, db_models, schemas, crud, auth
@@ -71,6 +73,9 @@ def get_token(user):
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
+
+
+
 # ===== ENDPOINTS AUTHENTIFICATION =====
 @app.post("/users/", response_model=AuthResponse)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -106,30 +111,65 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         "token": get_token(user)
     }
 
+
+def rate_limit_retry(max_retries=3, initial_delay=2):
+    """Décorateur pour gérer les rate limits avec retry exponentiel"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            delay = initial_delay
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if "429" in str(e) or "RATE_LIMIT_EXCEEDED" in str(e):
+                        if attempt < max_retries - 1:
+                            print(f"⏳ Rate limit atteint, attente {delay}s (tentative {attempt + 1}/{max_retries})")
+                            time.sleep(delay)
+                            delay *= 2  # Backoff exponentiel
+                        else:
+                            raise
+                    else:
+                        raise
+            return None
+        return wrapper
+    return decorator
+
 # ===== ENDPOINT PRÉDICTION (SIMPLIFIÉ) =====
 @app.post("/predict/")
 async def predict(
     user_id: int = Form(...),
-    prediction: str = Form(...),      # Vient de Flutter
-    confidence: float = Form(...),    # Vient de Flutter
+    prediction: str = Form(...),
+    confidence: float = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    """
-    Reçoit la prédiction calculée par Flutter.
-    Génère des conseils avec Gemini (optionnel).
-    Sauvegarde dans la base de données.
-    """
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        # ===== GÉNÉRATION DE CONSEILS AVEC GEMINI =====
         final_advice = ""
         
         if GEMINI_API_KEY:
             try:
-                gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                # CHANGEZ LE MODÈLE : utilisez gemini-1.5-flash (plus de quota)
+                gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+                
+                # Configuration de sécurité pour images médicales
+                safety_settings = [
+                    {
+                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                        "threshold": "BLOCK_ONLY_HIGH"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_HARASSMENT",
+                        "threshold": "BLOCK_ONLY_HIGH"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                        "threshold": "BLOCK_ONLY_HIGH"  # Important pour images de peau
+                    },
+                ]
                 
                 prompt = f"""
                 En tant qu'assistant de santé virtuel, analyse l'image de peau ci-jointe.
@@ -144,16 +184,30 @@ async def predict(
                 Adopte un ton rassurant mais professionnel. Ne pose pas de question en retour.
                 """
 
-                response = gemini_model.generate_content([prompt, image])
+                # Ajout d'un délai entre requêtes (simple throttling)
+                time.sleep(1)  # Attendre 1 seconde avant chaque requête
+                
+                response = gemini_model.generate_content(
+                    [prompt, image],
+                    safety_settings=safety_settings
+                )
                 final_advice = clean_markdown_for_mobile(response.text)
                 
             except Exception as gemini_error:
-                print(f"❌ Erreur Gemini : {gemini_error}")
-                final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
+                error_msg = str(gemini_error)
+                print(f"❌ Erreur Gemini : {error_msg}")
+                
+                # Messages d'erreur plus spécifiques
+                if "429" in error_msg or "RATE_LIMIT" in error_msg:
+                    final_advice = "⏳ Service temporairement surchargé. Réessayez dans quelques instants."
+                elif "SAFETY" in error_msg:
+                    final_advice = "Image non analysable. Consultez un professionnel de santé."
+                else:
+                    final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
         else:
             final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
         
-        # ===== SAUVEGARDE DANS LA BASE DE DONNÉES =====
+        # Sauvegarde dans la base (même si Gemini échoue)
         prediction_data = schemas.PredictionCreate(
             filename=file.filename,
             prediction=prediction,
@@ -173,6 +227,7 @@ async def predict(
     except Exception as e:
         print(f"❌ Erreur : {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 # ===== ENDPOINTS HISTORIQUE =====
 @app.get("/history/{user_id}", response_model=List[schemas.PredictionOut])
