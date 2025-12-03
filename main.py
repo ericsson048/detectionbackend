@@ -149,6 +149,8 @@ async def predict(
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
         final_advice = ""
+
+        # logger.info("Prediction request received",image)
         
         if GEMINI_API_KEY:
             try:
@@ -188,7 +190,7 @@ async def predict(
                 time.sleep(1)  # Attendre 1 seconde avant chaque requête
                 
                 response = gemini_model.generate_content(
-                    [prompt, image],
+                    prompt,
                     safety_settings=safety_settings
                 )
                 final_advice = clean_markdown_for_mobile(response.text)
