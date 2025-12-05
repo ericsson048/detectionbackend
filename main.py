@@ -136,6 +136,100 @@ def rate_limit_retry(max_retries=3, initial_delay=2):
     return decorator
 
 # ===== ENDPOINT PRÉDICTION (SIMPLIFIÉ) =====
+# @app.post("/predict/")
+# async def predict(
+#     user_id: int = Form(...),
+#     prediction: str = Form(...),
+#     confidence: float = Form(...),
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db)
+# ):
+#     try:
+#         contents = await file.read()
+#         image = Image.open(io.BytesIO(contents)).convert("RGB")
+        
+#         final_advice = ""
+
+#         # logger.info("Prediction request received",image)
+        
+#         if GEMINI_API_KEY:
+#             try:
+#                 # CHANGEZ LE MODÈLE : utilisez gemini-1.5-flash (plus de quota)
+#                 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+                
+#                 # Configuration de sécurité pour images médicales
+#                 safety_settings = [
+#                     {
+#                         "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+#                         "threshold": "BLOCK_ONLY_HIGH"
+#                     },
+#                     {
+#                         "category": "HARM_CATEGORY_HARASSMENT",
+#                         "threshold": "BLOCK_ONLY_HIGH"
+#                     },
+#                     {
+#                         "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+#                         "threshold": "BLOCK_ONLY_HIGH"  # Important pour images de peau
+#                     },
+#                 ]
+                
+#                 prompt = f"""
+#                 En tant qu'assistant de santé virtuel, analyse l'image de peau ci-jointe.
+#                 Le diagnostic suggère qu'il pourrait s'agir de : '{prediction}'.
+
+#                 Fournis des conseils clairs et structurés en français :
+#                 1. **Description brève** : Décris brièvement en une phrase ce que '{prediction}' implique.
+#                 2. **Recommandations** : Donne 2 ou 3 conseils pratiques (hygiène, gestes à éviter, etc.).
+#                 3. **Avertissement** : Termine TOUJOURS en rappelant que tu n'es pas un médecin et qu'il est 
+#                    impératif de consulter un professionnel de santé pour un diagnostic confirmé.
+                
+#                 Adopte un ton rassurant mais professionnel. Ne pose pas de question en retour.
+#                 """
+
+#                 # Ajout d'un délai entre requêtes (simple throttling)
+#                 time.sleep(1)  # Attendre 1 seconde avant chaque requête
+                
+#                 response = gemini_model.generate_content(
+#                     prompt,
+#                     safety_settings=safety_settings
+#                 )
+#                 final_advice = clean_markdown_for_mobile(response.text)
+                
+#             except Exception as gemini_error:
+#                 error_msg = str(gemini_error)
+#                 print(f"❌ Erreur Gemini : {error_msg}")
+                
+#                 # Messages d'erreur plus spécifiques
+#                 if "429" in error_msg or "RATE_LIMIT" in error_msg:
+#                     final_advice = "⏳ Service temporairement surchargé. Réessayez dans quelques instants."
+#                 elif "SAFETY" in error_msg:
+#                     final_advice = "Image non analysable. Consultez un professionnel de santé."
+#                 else:
+#                     final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
+#         else:
+#             final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
+        
+#         # Sauvegarde dans la base (même si Gemini échoue)
+#         prediction_data = schemas.PredictionCreate(
+#             filename=file.filename,
+#             prediction=prediction,
+#             confidence=confidence,
+#             advice=final_advice,
+#             image=contents
+#         )
+#         crud.create_prediction(db, prediction_data, user_id)
+
+#         return JSONResponse({
+#             "filename": file.filename,
+#             "prediction": prediction,
+#             "confidence": confidence,
+#             "advice": final_advice
+#         })
+        
+#     except Exception as e:
+#         print(f"❌ Erreur : {e}")
+#         return JSONResponse({"error": str(e)}, status_code=500)
+
 @app.post("/predict/")
 async def predict(
     user_id: int = Form(...),
@@ -149,12 +243,10 @@ async def predict(
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
         final_advice = ""
-
-        # logger.info("Prediction request received",image)
         
         if GEMINI_API_KEY:
             try:
-                # CHANGEZ LE MODÈLE : utilisez gemini-1.5-flash (plus de quota)
+                # Modèle gemini-1.5-flash : bon compromis quota/performance/multimodalité
                 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
                 
                 # Configuration de sécurité pour images médicales
@@ -187,10 +279,11 @@ async def predict(
                 """
 
                 # Ajout d'un délai entre requêtes (simple throttling)
-                time.sleep(1)  # Attendre 1 seconde avant chaque requête
+                time.sleep(1) 
                 
+                # --- MODIFICATION CRUCIALE : Passage de l'image (objet PIL) au modèle ---
                 response = gemini_model.generate_content(
-                    prompt,
+                    [prompt, image], # <-- L'image et le prompt sont passés ensemble
                     safety_settings=safety_settings
                 )
                 final_advice = clean_markdown_for_mobile(response.text)
@@ -203,6 +296,7 @@ async def predict(
                 if "429" in error_msg or "RATE_LIMIT" in error_msg:
                     final_advice = "⏳ Service temporairement surchargé. Réessayez dans quelques instants."
                 elif "SAFETY" in error_msg:
+                    # En cas de blocage de sécurité, on utilise un message d'avertissement
                     final_advice = "Image non analysable. Consultez un professionnel de santé."
                 else:
                     final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
@@ -227,9 +321,8 @@ async def predict(
         })
         
     except Exception as e:
-        print(f"❌ Erreur : {e}")
+        print(f"❌ Erreur générale : {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 # ===== ENDPOINTS HISTORIQUE =====
 @app.get("/history/{user_id}", response_model=List[schemas.PredictionOut])
