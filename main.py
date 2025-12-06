@@ -36,7 +36,7 @@ else:
 # ===== CONFIGURATION EMAIL =====
 email_config = ConnectionConfig(
     MAIL_USERNAME=os.getenv("MAIL_USERNAME", "edulms048@gmail.com"),
-    MAIL_PASSWORD=os.getenv("MAIL_PASSWORD", "votre-mot-de-passe-app"),
+    MAIL_PASSWORD=os.getenv("MAIL_PASSWORD", "ifgq wumr wapv ltmj"),
     MAIL_FROM=os.getenv("MAIL_FROM", "edulms048@gmail.com"),
     MAIL_PORT=int(os.getenv("MAIL_PORT", 587)),
     MAIL_SERVER=os.getenv("MAIL_SERVER", "smtp.gmail.com"),
