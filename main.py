@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List
@@ -13,6 +13,10 @@ import jwt
 import datetime
 import time
 from functools import wraps
+
+# ===== IMPORTS EMAIL =====
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
+from pydantic import EmailStr
 
 # ===== IMPORTS SANS PyTorch =====
 import database, db_models, schemas, crud, auth
@@ -29,6 +33,21 @@ if GEMINI_API_KEY:
 else:
     print("⚠️ GEMINI_API_KEY non configurée. Conseils IA désactivés.")
 
+# ===== CONFIGURATION EMAIL =====
+email_config = ConnectionConfig(
+    MAIL_USERNAME=os.getenv("MAIL_USERNAME", "edulms048@gmail.com"),
+    MAIL_PASSWORD=os.getenv("MAIL_PASSWORD", "votre-mot-de-passe-app"),
+    MAIL_FROM=os.getenv("MAIL_FROM", "edulms048@gmail.com"),
+    MAIL_PORT=int(os.getenv("MAIL_PORT", 587)),
+    MAIL_SERVER=os.getenv("MAIL_SERVER", "smtp.gmail.com"),
+    MAIL_STARTTLS=True,
+    MAIL_SSL_TLS=False,
+    USE_CREDENTIALS=True,
+    VALIDATE_CERTS=True
+)
+
+fm = FastMail(email_config)
+
 # ===== INITIALISATION =====
 db_models.Base.metadata.create_all(bind=database.engine)
 app = FastAPI(
@@ -40,6 +59,7 @@ app = FastAPI(
     * **Authentification** : Gestion des utilisateurs (inscription, connexion, JWT).
     * **Prédiction** : Réception des résultats de l'IA mobile et génération de conseils via Gemini.
     * **Historique** : Suivi des prédictions passées.
+    * **Notifications** : Envoi d'emails automatiques.
     
     Note : L'inférence ML principale est effectuée côté client (Flutter) avec TFLite.
     """,
@@ -73,257 +93,311 @@ def get_token(user):
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-
-
-
-# ===== ENDPOINTS AUTHENTIFICATION =====
-@app.post("/users/", response_model=AuthResponse)
-def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    """Crée un nouvel utilisateur"""
-    db_user = crud.get_user_by_username(db, user.username)
-    if db_user:
-        raise HTTPException(status_code=400, detail="Username already registered")
+# ===== TEMPLATES EMAIL =====
+def get_prediction_email_template(username: str, prediction: str, confidence: float, advice: str) -> str:
+    """Template HTML pour email de résultat"""
+    # Déterminer la couleur selon la gravité
+    color = "#dc3545" if prediction.lower() in ["measles", "monkeypox"] else "#667eea"
     
-    user = crud.create_user(db, user)
-    return {
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email
-        },
-        "token": get_token(user)
-    }
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #f4f4f4;
+            }}
+            .container {{
+                background: white;
+                border-radius: 10px;
+                overflow: hidden;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            .header {{
+                background: linear-gradient(135deg, {color} 0%, #764ba2 100%);
+                color: white;
+                padding: 30px;
+                text-align: center;
+            }}
+            .header h1 {{
+                margin: 0;
+                font-size: 24px;
+            }}
+            .content {{
+                padding: 30px;
+            }}
+            .result-box {{
+                background: #f8f9fa;
+                padding: 20px;
+                border-radius: 8px;
+                margin: 20px 0;
+                border-left: 4px solid {color};
+            }}
+            .result-box h2 {{
+                margin-top: 0;
+                color: {color};
+                font-size: 20px;
+            }}
+            .confidence {{
+                display: inline-block;
+                background: {color};
+                color: white;
+                padding: 5px 15px;
+                border-radius: 20px;
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            .advice {{
+                background: #fff3cd;
+                border-left: 4px solid #ffc107;
+                padding: 15px;
+                margin: 20px 0;
+                border-radius: 4px;
+                white-space: pre-line;
+            }}
+            .warning {{
+                background: #f8d7da;
+                border-left: 4px solid #dc3545;
+                padding: 15px;
+                margin: 20px 0;
+                border-radius: 4px;
+                color: #721c24;
+            }}
+            .footer {{
+                text-align: center;
+                padding: 20px;
+                background: #f8f9fa;
+                color: #666;
+                font-size: 12px;
+            }}
+            .button {{
+                display: inline-block;
+                background: {color};
+                color: white;
+                padding: 12px 30px;
+                text-decoration: none;
+                border-radius: 5px;
+                margin: 20px 0;
+                font-weight: bold;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🏥 Résultat de votre analyse cutanée</h1>
+            </div>
+            
+            <div class="content">
+                <p>Bonjour <strong>{username}</strong>,</p>
+                
+                <p>Votre analyse a été effectuée avec succès. Voici les résultats :</p>
+                
+                <div class="result-box">
+                    <h2>📊 Diagnostic détecté</h2>
+                    <h3 style="color: #333; margin: 10px 0;">{prediction}</h3>
+                    <p style="margin-top: 15px;">
+                        Niveau de confiance : <span class="confidence">{confidence:.1%}</span>
+                    </p>
+                </div>
+                
+                <div class="advice">
+                    <strong>💡 Conseils personnalisés :</strong><br><br>
+                    {advice}
+                </div>
+                
+                <div class="warning">
+                    <strong>⚠️ Avertissement médical :</strong><br>
+                    Ces résultats sont générés par intelligence artificielle et ne constituent pas un diagnostic médical officiel. 
+                    Consultez toujours un professionnel de santé qualifié pour obtenir un avis médical personnalisé et un traitement approprié.
+                </div>
+                
+                <center>
+                    <p style="margin-top: 30px;">
+                        <a href="https://votre-app.com" class="button">
+                            📱 Ouvrir l'application
+                        </a>
+                    </p>
+                </center>
+                
+                <p style="color: #666; font-size: 14px; margin-top: 30px;">
+                    💡 <strong>Conseil :</strong> Conservez cet email pour votre suivi médical et montrez-le à votre médecin si nécessaire.
+                </p>
+            </div>
+            
+            <div class="footer">
+                <p><strong>SkinDetect</strong> - Détection de maladies cutanées par IA</p>
+                <p>Cet email a été envoyé automatiquement suite à votre analyse.</p>
+                <p>Pour toute question : edulms048@gmail.com</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
-@app.post("/login/")
-def login(data: LoginRequest, db: Session = Depends(get_db)):
-    """Authentifie un utilisateur"""
-    user = crud.get_user_by_username(db, data.username)
-    
-    if not user or not auth.verify_password(data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    return {
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email
-        },
-        "token": get_token(user)
-    }
+def get_welcome_email_template(username: str) -> str:
+    """Template HTML pour email de bienvenue"""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #f4f4f4;
+            }}
+            .container {{
+                background: white;
+                border-radius: 10px;
+                overflow: hidden;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            .header {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 40px 30px;
+                text-align: center;
+            }}
+            .header h1 {{
+                margin: 0;
+                font-size: 28px;
+            }}
+            .content {{
+                padding: 30px;
+            }}
+            .feature-box {{
+                background: #f8f9fa;
+                padding: 15px;
+                margin: 15px 0;
+                border-radius: 8px;
+                border-left: 4px solid #667eea;
+            }}
+            .feature-box strong {{
+                color: #667eea;
+                font-size: 16px;
+            }}
+            .footer {{
+                text-align: center;
+                padding: 20px;
+                background: #f8f9fa;
+                color: #666;
+                font-size: 12px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>👋 Bienvenue sur SkinDetect !</h1>
+                <p style="margin: 10px 0 0 0; font-size: 16px;">Votre assistant santé cutanée par IA</p>
+            </div>
+            
+            <div class="content">
+                <p>Bonjour <strong>{username}</strong>,</p>
+                
+                <p>Merci de vous être inscrit sur <strong>SkinDetect</strong> ! Nous sommes ravis de vous accompagner dans le suivi de votre santé cutanée.</p>
+                
+                <h3 style="color: #667eea;">🎯 Ce que vous pouvez faire :</h3>
+                
+                <div class="feature-box">
+                    <strong>📸 Analyse instantanée</strong><br>
+                    Prenez une photo de votre peau et obtenez un diagnostic préliminaire en quelques secondes grâce à notre IA avancée.
+                </div>
+                
+                <div class="feature-box">
+                    <strong>💡 Conseils personnalisés</strong><br>
+                    Recevez des recommandations adaptées à votre condition détectée, avec des conseils pratiques et des mesures préventives.
+                </div>
+                
+                <div class="feature-box">
+                    <strong>📊 Historique complet</strong><br>
+                    Suivez l'évolution de vos analyses dans le temps et conservez un historique détaillé de vos résultats.
+                </div>
+                
+                <div class="feature-box">
+                    <strong>📧 Notifications email</strong><br>
+                    Recevez vos résultats directement par email pour les partager facilement avec votre médecin.
+                </div>
+                
+                <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
+                    <strong>⚠️ Rappel important :</strong><br>
+                    SkinDetect est un outil d'aide à la décision, <strong>pas un substitut</strong> à une consultation médicale professionnelle. 
+                    Consultez toujours un dermatologue pour un diagnostic confirmé.
+                </div>
+                
+                <center style="margin-top: 30px;">
+                    <p><strong>Prêt à commencer ?</strong></p>
+                    <p style="color: #666;">Ouvrez l'application mobile et effectuez votre première analyse !</p>
+                </center>
+            </div>
+            
+            <div class="footer">
+                <p><strong>SkinDetect</strong> - Détection de maladies cutanées par IA</p>
+                <p>Des questions ? Contactez-nous : edulms048@gmail.com</p>
+                <p style="margin-top: 10px; color: #999;">
+                    Vous recevez cet email car vous vous êtes inscrit sur SkinDetect.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
-
-def rate_limit_retry(max_retries=3, initial_delay=2):
-    """Décorateur pour gérer les rate limits avec retry exponentiel"""
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            delay = initial_delay
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    if "429" in str(e) or "RATE_LIMIT_EXCEEDED" in str(e):
-                        if attempt < max_retries - 1:
-                            print(f"⏳ Rate limit atteint, attente {delay}s (tentative {attempt + 1}/{max_retries})")
-                            time.sleep(delay)
-                            delay *= 2  # Backoff exponentiel
-                        else:
-                            raise
-                    else:
-                        raise
-            return None
-        return wrapper
-    return decorator
-
-# ===== ENDPOINT PRÉDICTION (SIMPLIFIÉ) =====
-# @app.post("/predict/")
-# async def predict(
-#     user_id: int = Form(...),
-#     prediction: str = Form(...),
-#     confidence: float = Form(...),
-#     file: UploadFile = File(...),
-#     db: Session = Depends(get_db)
-# ):
-#     try:
-#         contents = await file.read()
-#         image = Image.open(io.BytesIO(contents)).convert("RGB")
+# ===== FONCTIONS D'ENVOI EMAIL =====
+async def send_prediction_email(
+    user_email: str,
+    username: str,
+    prediction: str,
+    confidence: float,
+    advice: str
+):
+    """Envoie un email avec les résultats de prédiction"""
+    try:
+        html = get_prediction_email_template(username, prediction, confidence, advice)
         
-#         final_advice = ""
-
-#         # logger.info("Prediction request received",image)
+        message = MessageSchema(
+            subject=f"✅ Résultat d'analyse : {prediction}",
+            recipients=[user_email],
+            body=html,
+            subtype=MessageType.html
+        )
         
-#         if GEMINI_API_KEY:
-#             try:
-#                 # CHANGEZ LE MODÈLE : utilisez gemini-1.5-flash (plus de quota)
-#                 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-                
-#                 # Configuration de sécurité pour images médicales
-#                 safety_settings = [
-#                     {
-#                         "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-#                         "threshold": "BLOCK_ONLY_HIGH"
-#                     },
-#                     {
-#                         "category": "HARM_CATEGORY_HARASSMENT",
-#                         "threshold": "BLOCK_ONLY_HIGH"
-#                     },
-#                     {
-#                         "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-#                         "threshold": "BLOCK_ONLY_HIGH"  # Important pour images de peau
-#                     },
-#                 ]
-                
-#                 prompt = f"""
-#                 En tant qu'assistant de santé virtuel, analyse l'image de peau ci-jointe.
-#                 Le diagnostic suggère qu'il pourrait s'agir de : '{prediction}'.
-
-#                 Fournis des conseils clairs et structurés en français :
-#                 1. **Description brève** : Décris brièvement en une phrase ce que '{prediction}' implique.
-#                 2. **Recommandations** : Donne 2 ou 3 conseils pratiques (hygiène, gestes à éviter, etc.).
-#                 3. **Avertissement** : Termine TOUJOURS en rappelant que tu n'es pas un médecin et qu'il est 
-#                    impératif de consulter un professionnel de santé pour un diagnostic confirmé.
-                
-#                 Adopte un ton rassurant mais professionnel. Ne pose pas de question en retour.
-#                 """
-
-#                 # Ajout d'un délai entre requêtes (simple throttling)
-#                 time.sleep(1)  # Attendre 1 seconde avant chaque requête
-                
-#                 response = gemini_model.generate_content(
-#                     prompt,
-#                     safety_settings=safety_settings
-#                 )
-#                 final_advice = clean_markdown_for_mobile(response.text)
-                
-#             except Exception as gemini_error:
-#                 error_msg = str(gemini_error)
-#                 print(f"❌ Erreur Gemini : {error_msg}")
-                
-#                 # Messages d'erreur plus spécifiques
-#                 if "429" in error_msg or "RATE_LIMIT" in error_msg:
-#                     final_advice = "⏳ Service temporairement surchargé. Réessayez dans quelques instants."
-#                 elif "SAFETY" in error_msg:
-#                     final_advice = "Image non analysable. Consultez un professionnel de santé."
-#                 else:
-#                     final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
-#         else:
-#             final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
+        await fm.send_message(message)
+        print(f"✅ Email de résultat envoyé à {user_email}")
         
-#         # Sauvegarde dans la base (même si Gemini échoue)
-#         prediction_data = schemas.PredictionCreate(
-#             filename=file.filename,
-#             prediction=prediction,
-#             confidence=confidence,
-#             advice=final_advice,
-#             image=contents
-#         )
-#         crud.create_prediction(db, prediction_data, user_id)
+    except Exception as e:
+        print(f"❌ Erreur envoi email de résultat : {e}")
 
-#         return JSONResponse({
-#             "filename": file.filename,
-#             "prediction": prediction,
-#             "confidence": confidence,
-#             "advice": final_advice
-#         })
+async def send_welcome_email(user_email: str, username: str):
+    """Envoie un email de bienvenue"""
+    try:
+        html = get_welcome_email_template(username)
         
-#     except Exception as e:
-#         print(f"❌ Erreur : {e}")
-#         return JSONResponse({"error": str(e)}, status_code=500)
-
-# @app.post("/predict/")
-# async def predict(
-#     user_id: int = Form(...),
-#     prediction: str = Form(...),
-#     confidence: float = Form(...),
-#     file: UploadFile = File(...),
-#     db: Session = Depends(get_db)
-# ):
-#     try:
-#         contents = await file.read()
-#         image = Image.open(io.BytesIO(contents)).convert("RGB")
+        message = MessageSchema(
+            subject="👋 Bienvenue sur SkinDetect - Votre assistant santé cutanée",
+            recipients=[user_email],
+            body=html,
+            subtype=MessageType.html
+        )
         
-#         final_advice = ""
+        await fm.send_message(message)
+        print(f"✅ Email de bienvenue envoyé à {user_email}")
         
-#         if GEMINI_API_KEY:
-#             try:
-#                 # Modèle gemini-1.5-flash : bon compromis quota/performance/multimodalité
-#                 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-                
-#                 # Configuration de sécurité pour images médicales
-#                 safety_settings = [
-#                     {
-#                         "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-#                         "threshold": "BLOCK_ONLY_HIGH"
-#                     },
-#                     {
-#                         "category": "HARM_CATEGORY_HARASSMENT",
-#                         "threshold": "BLOCK_ONLY_HIGH"
-#                     },
-#                     {
-#                         "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-#                         "threshold": "BLOCK_ONLY_HIGH"  # Important pour images de peau
-#                     },
-#                 ]
-                
-#                 prompt = f"""
-#                 En tant qu'assistant de santé virtuel, analyse l'image de peau ci-jointe.
-#                 Le diagnostic suggère qu'il pourrait s'agir de : '{prediction}'.
-
-#                 Fournis des conseils clairs et structurés en français :
-#                 1. **Description brève** : Décris brièvement en une phrase ce que '{prediction}' implique.
-#                 2. **Recommandations** : Donne 2 ou 3 conseils pratiques (hygiène, gestes à éviter, etc.).
-#                 3. **Avertissement** : Termine TOUJOURS en rappelant que tu n'es pas un médecin et qu'il est 
-#                    impératif de consulter un professionnel de santé pour un diagnostic confirmé.
-                
-#                 Adopte un ton rassurant mais professionnel. Ne pose pas de question en retour.
-#                 """
-
-#                 # Ajout d'un délai entre requêtes (simple throttling)
-#                 time.sleep(1) 
-                
-#                 # --- MODIFICATION CRUCIALE : Passage de l'image (objet PIL) au modèle ---
-#                 response = gemini_model.generate_content(
-#                     [prompt, image], # <-- L'image et le prompt sont passés ensemble
-#                     safety_settings=safety_settings
-#                 )
-#                 final_advice = clean_markdown_for_mobile(response.text)
-                
-#             except Exception as gemini_error:
-#                 error_msg = str(gemini_error)
-#                 print(f"❌ Erreur Gemini : {error_msg}")
-                
-#                 # Messages d'erreur plus spécifiques
-#                 if "429" in error_msg or "RATE_LIMIT" in error_msg:
-#                     final_advice = "⏳ Service temporairement surchargé. Réessayez dans quelques instants."
-#                 elif "SAFETY" in error_msg:
-#                     # En cas de blocage de sécurité, on utilise un message d'avertissement
-#                     final_advice = "Image non analysable. Consultez un professionnel de santé."
-#                 else:
-#                     final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
-#         else:
-#             final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
-        
-#         # Sauvegarde dans la base (même si Gemini échoue)
-#         prediction_data = schemas.PredictionCreate(
-#             filename=file.filename,
-#             prediction=prediction,
-#             confidence=confidence,
-#             advice=final_advice,
-#             image=contents
-#         )
-#         crud.create_prediction(db, prediction_data, user_id)
-
-#         return JSONResponse({
-#             "filename": file.filename,
-#             "prediction": prediction,
-#             "confidence": confidence,
-#             "advice": final_advice
-#         })
-        
-#     except Exception as e:
-#         print(f"❌ Erreur générale : {e}")
-#         return JSONResponse({"error": str(e)}, status_code=500)
-
+    except Exception as e:
+        print(f"❌ Erreur envoi email de bienvenue : {e}")
 
 # ===== DICTIONNAIRE DE CONSEILS STATIQUES =====
 STATIC_ADVICE = {
@@ -426,85 +500,71 @@ def get_static_advice(prediction: str) -> str:
     
     return formatted_advice
 
+# ===== ENDPOINTS AUTHENTIFICATION =====
+@app.post("/users/", response_model=AuthResponse)
+async def create_user(
+    user: schemas.UserCreate, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Crée un nouvel utilisateur et envoie un email de bienvenue"""
+    db_user = crud.get_user_by_username(db, user.username)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    new_user = crud.create_user(db, user)
+    
+    # Envoi de l'email de bienvenue en arrière-plan
+    background_tasks.add_task(send_welcome_email, new_user.email, new_user.username)
+    
+    return {
+        "user": {
+            "id": new_user.id,
+            "username": new_user.username,
+            "email": new_user.email
+        },
+        "token": get_token(new_user)
+    }
 
-# ===== ENDPOINT PRÉDICTION AVEC CONSEILS STATIQUES =====
+@app.post("/login/")
+def login(data: LoginRequest, db: Session = Depends(get_db)):
+    """Authentifie un utilisateur"""
+    user = crud.get_user_by_username(db, data.username)
+    
+    if not user or not auth.verify_password(data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    return {
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email
+        },
+        "token": get_token(user)
+    }
+
+# ===== ENDPOINT PRÉDICTION =====
 @app.post("/predict/")
 async def predict(
     user_id: int = Form(...),
     prediction: str = Form(...),
     confidence: float = Form(...),
     file: UploadFile = File(...),
-    use_ai_enhancement: bool = Form(False),  # Paramètre optionnel pour activer Gemini
+    send_email: bool = Form(True),  # Activé par défaut
+    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db)
 ):
     """
-    Endpoint de prédiction avec conseils statiques fiables.
-    
-    Paramètres:
-    - user_id: ID de l'utilisateur
-    - prediction: Nom de la maladie détectée
-    - confidence: Niveau de confiance (0-1)
-    - file: Image analysée
-    - use_ai_enhancement: Active l'enrichissement par IA (optionnel, défaut: False)
+    Endpoint de prédiction avec conseils statiques et envoi d'email optionnel.
     """
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        # 1. TOUJOURS générer des conseils statiques (fiables et instantanés)
+        # Générer les conseils statiques
         final_advice = get_static_advice(prediction)
         
-        # 2. Enrichissement optionnel par Gemini (si activé ET clé API disponible)
-        if use_ai_enhancement and GEMINI_API_KEY:
-            try:
-                gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-                
-                safety_settings = [
-                    {
-                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                        "threshold": "BLOCK_ONLY_HIGH"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_HARASSMENT",
-                        "threshold": "BLOCK_ONLY_HIGH"
-                    },
-                    {
-                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        "threshold": "BLOCK_ONLY_HIGH"
-                    },
-                ]
-                
-                prompt = f"""
-                Enrichis ces conseils de base pour '{prediction}' avec 1-2 informations complémentaires utiles :
-                
-                {final_advice}
-                
-                Ajoute SEULEMENT :
-                - Un conseil pratique supplémentaire spécifique à cette condition
-                - OU une précision sur quand consulter en urgence
-                
-                Reste concis (max 3 phrases). Ton rassurant et professionnel.
-                """
-
-                time.sleep(1)  # Rate limiting
-                
-                response = gemini_model.generate_content(
-                    prompt,
-                    safety_settings=safety_settings
-                )
-                
-                # Ajouter l'enrichissement IA après les conseils statiques
-                ai_enhancement = clean_markdown_for_mobile(response.text)
-                final_advice += f"\n\n🤖 Complément IA :\n{ai_enhancement}"
-                
-            except Exception as gemini_error:
-                error_msg = str(gemini_error)
-                print(f"⚠️ Enrichissement IA échoué : {error_msg}")
-                # On garde les conseils statiques sans échouer
-                if "429" in error_msg or "RATE_LIMIT" in error_msg:
-                    final_advice += "\n\n(Enrichissement IA temporairement indisponible)"
-        
-        # 3. Sauvegarde dans la base
+        # Sauvegarde dans la base
         prediction_data = schemas.PredictionCreate(
             filename=file.filename,
             prediction=prediction,
@@ -513,33 +573,48 @@ async def predict(
             image=contents
         )
         crud.create_prediction(db, prediction_data, user_id)
+        
+        # Envoi d'email si activé
+        if send_email and background_tasks:
+            user = crud.get_user_by_id(db, user_id)
+            if user and user.email:
+                background_tasks.add_task(
+                    send_prediction_email,
+                    user.email,
+                    user.username,
+                    prediction,
+                    confidence,
+                    final_advice
+                )
 
         return JSONResponse({
             "filename": file.filename,
             "prediction": prediction,
             "confidence": confidence,
             "advice": final_advice,
-            "advice_source": "static+ai" if use_ai_enhancement and GEMINI_API_KEY else "static"
+            "email_sent": send_email
         })
         
     except Exception as e:
         print(f"❌ Erreur générale : {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-
-# ===== ENDPOINT POUR LISTER LES MALADIES SUPPORTÉES =====
-@app.get("/supported-conditions/")
-def get_supported_conditions():
-    """Retourne la liste des conditions avec conseils statiques disponibles"""
-    conditions = []
-    for key, value in STATIC_ADVICE.items():
-        if key != "default":
-            conditions.append({
-                "name": key,
-                "description": value["description"]
-            })
-    return {"conditions": conditions, "total": len(conditions)}
-    
+# ===== ENDPOINT TEST EMAIL =====
+@app.post("/send-test-email/")
+async def send_test_email(
+    email: EmailStr,
+    background_tasks: BackgroundTasks
+):
+    """Endpoint pour tester l'envoi d'email"""
+    background_tasks.add_task(
+        send_welcome_email, 
+        email, 
+        "Utilisateur Test"
+    )
+    return {
+        "message": f"Email de test envoyé à {email}",
+        "status": "success"
+    }
 
 # ===== ENDPOINTS HISTORIQUE =====
 @app.get("/history/{user_id}", response_model=List[schemas.PredictionOut])
@@ -576,27 +651,44 @@ def get_all_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
     """Récupère tous les utilisateurs (avec pagination)"""
     return crud.get_users(db, skip=skip, limit=limit)
 
+# ===== ENDPOINT MALADIES SUPPORTÉES =====
+@app.get("/supported-conditions/")
+def get_supported_conditions():
+    """Retourne la liste des conditions avec conseils statiques disponibles"""
+    conditions = []
+    for key, value in STATIC_ADVICE.items():
+        if key != "default":
+            conditions.append({
+                "name": key,
+                "description": value["description"]
+            })
+    return {"conditions": conditions, "total": len(conditions)}
+
 # ===== HEALTH CHECK =====
 @app.get("/")
 def read_root():
     return {
         "status": "ok",
-        "message": "API is running - Version légère (sans PyTorch)",
+        "message": "SkinDetect API - Version avec emails",
+        "version": "1.0.0",
+        "features": ["predictions", "email_notifications", "history"],
         "ml_inference": "Client-side (Flutter)"
     }
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "memory_usage": "< 200MB"}
-
+    return {
+        "status": "healthy", 
+        "memory_usage": "< 200MB",
+        "email_configured": bool(os.getenv("MAIL_PASSWORD"))
+    }
 
 # ===== KEEP-ALIVE POUR RENDER =====
 import threading
-import time
 import requests
 
 def keep_alive():
-    """Ping l'API toutes les 2 minutes pour éviter la mise en veille (Render free)"""
+    """Ping l'API toutes les 2 minutes pour éviter la mise en veille"""
     while True:
         try:
             url = "https://detectionbackend-hln7.onrender.com"
@@ -611,10 +703,9 @@ def keep_alive():
 # Lancer le keep-alive dans un thread séparé
 threading.Thread(target=keep_alive, daemon=True).start()
 
-
 # ===== DÉMARRAGE =====
 if __name__ == "__main__":
     import uvicorn
     
     port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)  # Pas de --reload en production !
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
