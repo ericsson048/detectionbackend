@@ -230,26 +230,235 @@ def rate_limit_retry(max_retries=3, initial_delay=2):
 #         print(f"❌ Erreur : {e}")
 #         return JSONResponse({"error": str(e)}, status_code=500)
 
+# @app.post("/predict/")
+# async def predict(
+#     user_id: int = Form(...),
+#     prediction: str = Form(...),
+#     confidence: float = Form(...),
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db)
+# ):
+#     try:
+#         contents = await file.read()
+#         image = Image.open(io.BytesIO(contents)).convert("RGB")
+        
+#         final_advice = ""
+        
+#         if GEMINI_API_KEY:
+#             try:
+#                 # Modèle gemini-1.5-flash : bon compromis quota/performance/multimodalité
+#                 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+                
+#                 # Configuration de sécurité pour images médicales
+#                 safety_settings = [
+#                     {
+#                         "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+#                         "threshold": "BLOCK_ONLY_HIGH"
+#                     },
+#                     {
+#                         "category": "HARM_CATEGORY_HARASSMENT",
+#                         "threshold": "BLOCK_ONLY_HIGH"
+#                     },
+#                     {
+#                         "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+#                         "threshold": "BLOCK_ONLY_HIGH"  # Important pour images de peau
+#                     },
+#                 ]
+                
+#                 prompt = f"""
+#                 En tant qu'assistant de santé virtuel, analyse l'image de peau ci-jointe.
+#                 Le diagnostic suggère qu'il pourrait s'agir de : '{prediction}'.
+
+#                 Fournis des conseils clairs et structurés en français :
+#                 1. **Description brève** : Décris brièvement en une phrase ce que '{prediction}' implique.
+#                 2. **Recommandations** : Donne 2 ou 3 conseils pratiques (hygiène, gestes à éviter, etc.).
+#                 3. **Avertissement** : Termine TOUJOURS en rappelant que tu n'es pas un médecin et qu'il est 
+#                    impératif de consulter un professionnel de santé pour un diagnostic confirmé.
+                
+#                 Adopte un ton rassurant mais professionnel. Ne pose pas de question en retour.
+#                 """
+
+#                 # Ajout d'un délai entre requêtes (simple throttling)
+#                 time.sleep(1) 
+                
+#                 # --- MODIFICATION CRUCIALE : Passage de l'image (objet PIL) au modèle ---
+#                 response = gemini_model.generate_content(
+#                     [prompt, image], # <-- L'image et le prompt sont passés ensemble
+#                     safety_settings=safety_settings
+#                 )
+#                 final_advice = clean_markdown_for_mobile(response.text)
+                
+#             except Exception as gemini_error:
+#                 error_msg = str(gemini_error)
+#                 print(f"❌ Erreur Gemini : {error_msg}")
+                
+#                 # Messages d'erreur plus spécifiques
+#                 if "429" in error_msg or "RATE_LIMIT" in error_msg:
+#                     final_advice = "⏳ Service temporairement surchargé. Réessayez dans quelques instants."
+#                 elif "SAFETY" in error_msg:
+#                     # En cas de blocage de sécurité, on utilise un message d'avertissement
+#                     final_advice = "Image non analysable. Consultez un professionnel de santé."
+#                 else:
+#                     final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
+#         else:
+#             final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
+        
+#         # Sauvegarde dans la base (même si Gemini échoue)
+#         prediction_data = schemas.PredictionCreate(
+#             filename=file.filename,
+#             prediction=prediction,
+#             confidence=confidence,
+#             advice=final_advice,
+#             image=contents
+#         )
+#         crud.create_prediction(db, prediction_data, user_id)
+
+#         return JSONResponse({
+#             "filename": file.filename,
+#             "prediction": prediction,
+#             "confidence": confidence,
+#             "advice": final_advice
+#         })
+        
+#     except Exception as e:
+#         print(f"❌ Erreur générale : {e}")
+#         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ===== DICTIONNAIRE DE CONSEILS STATIQUES =====
+STATIC_ADVICE = {
+    "chickenpox": {
+        "description": "La varicelle est une infection virale très contagieuse causant des éruptions de vésicules.",
+        "recommendations": [
+            "Isolez-vous pour éviter la contagion (surtout femmes enceintes et bébés)",
+            "Ne grattez pas les boutons pour éviter les cicatrices et infections",
+            "Appliquez des compresses fraîches et des crèmes apaisantes",
+            "Coupez vos ongles courts et portez des gants la nuit si nécessaire"
+        ],
+        "warning": "⚠️ Consultez un médecin immédiatement si : fièvre élevée, difficultés respiratoires, ou si vous êtes immunodéprimé."
+    },
+    "cowpox": {
+        "description": "La vaccine (cowpox) est une infection virale rare transmise par contact avec des animaux infectés.",
+        "recommendations": [
+            "Évitez de toucher la lésion et lavez-vous soigneusement les mains",
+            "Couvrez la zone infectée avec un pansement propre",
+            "Ne partagez pas vos objets personnels (serviettes, vêtements)",
+            "Surveillez les signes d'infection secondaire (pus, rougeur croissante)"
+        ],
+        "warning": "Consultez un médecin pour confirmer le diagnostic et écarter d'autres infections virales plus graves."
+    },
+    "hfmd": {
+        "description": "Le syndrome pieds-mains-bouche (HFMD) est une infection virale courante chez les enfants.",
+        "recommendations": [
+            "Hydratez-vous bien et mangez des aliments mous si la bouche est douloureuse",
+            "Lavez-vous fréquemment les mains, surtout après contact avec les lésions",
+            "Évitez le contact rapproché avec d'autres personnes pendant 7-10 jours",
+            "Désinfectez les surfaces et jouets régulièrement"
+        ],
+        "warning": "Consultez un médecin si : forte fièvre, déshydratation, maux de tête sévères ou raideur de la nuque."
+    },
+    "healthy": {
+        "description": "Aucune anomalie cutanée détectée. Votre peau semble en bonne santé !",
+        "recommendations": [
+            "Continuez à protéger votre peau du soleil (SPF 30+ minimum)",
+            "Maintenez une bonne hydratation quotidienne",
+            "Adoptez une alimentation équilibrée riche en vitamines",
+            "Surveillez tout changement inhabituel (grains de beauté, taches)"
+        ],
+        "warning": "Consultez un dermatologue une fois par an pour un examen préventif, surtout si antécédents familiaux."
+    },
+    "measles": {
+        "description": "La rougeole est une infection virale très contagieuse et potentiellement grave.",
+        "recommendations": [
+            "⚠️ ISOLATION STRICTE : Restez chez vous pendant au moins 4 jours après l'éruption",
+            "Reposez-vous dans une pièce sombre (sensibilité à la lumière)",
+            "Hydratez-vous abondamment et prenez du paracétamol pour la fièvre",
+            "Évitez tout contact avec personnes non vaccinées, femmes enceintes et bébés"
+        ],
+        "warning": "⚠️ URGENCE MÉDICALE : Consultez immédiatement si complications (difficultés respiratoires, convulsions, confusion). La rougeole peut être mortelle."
+    },
+    "monkeypox": {
+        "description": "La variole du singe (Mpox) est une infection virale avec éruption cutanée caractéristique.",
+        "recommendations": [
+            "⚠️ ISOLEMENT REQUIS : Évitez tout contact physique jusqu'à guérison complète",
+            "Couvrez les lésions avec des pansements et changez-les régulièrement",
+            "Désinfectez toutes les surfaces touchées et lavez le linge à haute température",
+            "Ne partagez aucun objet personnel (literie, vêtements, ustensiles)"
+        ],
+        "warning": "⚠️ DÉCLARATION OBLIGATOIRE : Contactez immédiatement votre médecin ou les autorités sanitaires. Cette maladie nécessite un suivi médical strict."
+    },
+    "default": {
+        "description": "Affection cutanée détectée nécessitant une évaluation professionnelle.",
+        "recommendations": [
+            "Maintenez une bonne hygiène de la peau",
+            "Évitez de gratter ou irriter la zone affectée",
+            "Documentez l'évolution avec des photos datées",
+            "Notez tout symptôme associé (fièvre, douleur, démangeaisons)"
+        ],
+        "warning": "Seul un professionnel de santé peut établir un diagnostic précis. Consultez rapidement."
+    }
+}
+
+def get_static_advice(prediction: str) -> str:
+    """
+    Génère des conseils statiques formatés basés sur la prédiction.
+    Recherche par correspondance partielle (insensible à la casse).
+    """
+    prediction_lower = prediction.lower()
+    
+    # Recherche de correspondance
+    advice_data = None
+    for key in STATIC_ADVICE.keys():
+        if key in prediction_lower or prediction_lower in key:
+            advice_data = STATIC_ADVICE[key]
+            break
+    
+    # Si aucune correspondance, utiliser les conseils par défaut
+    if not advice_data:
+        advice_data = STATIC_ADVICE["default"]
+    
+    # Formatage pour mobile
+    formatted_advice = f"📌 {advice_data['description']}\n\n"
+    formatted_advice += "💡 Recommandations :\n"
+    for i, rec in enumerate(advice_data['recommendations'], 1):
+        formatted_advice += f"  • {rec}\n"
+    formatted_advice += f"\n⚠️ {advice_data['warning']}"
+    
+    return formatted_advice
+
+
+# ===== ENDPOINT PRÉDICTION AVEC CONSEILS STATIQUES =====
 @app.post("/predict/")
 async def predict(
     user_id: int = Form(...),
     prediction: str = Form(...),
     confidence: float = Form(...),
     file: UploadFile = File(...),
+    use_ai_enhancement: bool = Form(False),  # Paramètre optionnel pour activer Gemini
     db: Session = Depends(get_db)
 ):
+    """
+    Endpoint de prédiction avec conseils statiques fiables.
+    
+    Paramètres:
+    - user_id: ID de l'utilisateur
+    - prediction: Nom de la maladie détectée
+    - confidence: Niveau de confiance (0-1)
+    - file: Image analysée
+    - use_ai_enhancement: Active l'enrichissement par IA (optionnel, défaut: False)
+    """
     try:
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
-        final_advice = ""
+        # 1. TOUJOURS générer des conseils statiques (fiables et instantanés)
+        final_advice = get_static_advice(prediction)
         
-        if GEMINI_API_KEY:
+        # 2. Enrichissement optionnel par Gemini (si activé ET clé API disponible)
+        if use_ai_enhancement and GEMINI_API_KEY:
             try:
-                # Modèle gemini-1.5-flash : bon compromis quota/performance/multimodalité
                 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
                 
-                # Configuration de sécurité pour images médicales
                 safety_settings = [
                     {
                         "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
@@ -261,49 +470,41 @@ async def predict(
                     },
                     {
                         "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        "threshold": "BLOCK_ONLY_HIGH"  # Important pour images de peau
+                        "threshold": "BLOCK_ONLY_HIGH"
                     },
                 ]
                 
                 prompt = f"""
-                En tant qu'assistant de santé virtuel, analyse l'image de peau ci-jointe.
-                Le diagnostic suggère qu'il pourrait s'agir de : '{prediction}'.
-
-                Fournis des conseils clairs et structurés en français :
-                1. **Description brève** : Décris brièvement en une phrase ce que '{prediction}' implique.
-                2. **Recommandations** : Donne 2 ou 3 conseils pratiques (hygiène, gestes à éviter, etc.).
-                3. **Avertissement** : Termine TOUJOURS en rappelant que tu n'es pas un médecin et qu'il est 
-                   impératif de consulter un professionnel de santé pour un diagnostic confirmé.
+                Enrichis ces conseils de base pour '{prediction}' avec 1-2 informations complémentaires utiles :
                 
-                Adopte un ton rassurant mais professionnel. Ne pose pas de question en retour.
+                {final_advice}
+                
+                Ajoute SEULEMENT :
+                - Un conseil pratique supplémentaire spécifique à cette condition
+                - OU une précision sur quand consulter en urgence
+                
+                Reste concis (max 3 phrases). Ton rassurant et professionnel.
                 """
 
-                # Ajout d'un délai entre requêtes (simple throttling)
-                time.sleep(1) 
+                time.sleep(1)  # Rate limiting
                 
-                # --- MODIFICATION CRUCIALE : Passage de l'image (objet PIL) au modèle ---
                 response = gemini_model.generate_content(
-                    [prompt, image], # <-- L'image et le prompt sont passés ensemble
+                    prompt,
                     safety_settings=safety_settings
                 )
-                final_advice = clean_markdown_for_mobile(response.text)
+                
+                # Ajouter l'enrichissement IA après les conseils statiques
+                ai_enhancement = clean_markdown_for_mobile(response.text)
+                final_advice += f"\n\n🤖 Complément IA :\n{ai_enhancement}"
                 
             except Exception as gemini_error:
                 error_msg = str(gemini_error)
-                print(f"❌ Erreur Gemini : {error_msg}")
-                
-                # Messages d'erreur plus spécifiques
+                print(f"⚠️ Enrichissement IA échoué : {error_msg}")
+                # On garde les conseils statiques sans échouer
                 if "429" in error_msg or "RATE_LIMIT" in error_msg:
-                    final_advice = "⏳ Service temporairement surchargé. Réessayez dans quelques instants."
-                elif "SAFETY" in error_msg:
-                    # En cas de blocage de sécurité, on utilise un message d'avertissement
-                    final_advice = "Image non analysable. Consultez un professionnel de santé."
-                else:
-                    final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
-        else:
-            final_advice = "Consultez un professionnel de santé pour un avis personnalisé."
+                    final_advice += "\n\n(Enrichissement IA temporairement indisponible)"
         
-        # Sauvegarde dans la base (même si Gemini échoue)
+        # 3. Sauvegarde dans la base
         prediction_data = schemas.PredictionCreate(
             filename=file.filename,
             prediction=prediction,
@@ -317,12 +518,28 @@ async def predict(
             "filename": file.filename,
             "prediction": prediction,
             "confidence": confidence,
-            "advice": final_advice
+            "advice": final_advice,
+            "advice_source": "static+ai" if use_ai_enhancement and GEMINI_API_KEY else "static"
         })
         
     except Exception as e:
         print(f"❌ Erreur générale : {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ===== ENDPOINT POUR LISTER LES MALADIES SUPPORTÉES =====
+@app.get("/supported-conditions/")
+def get_supported_conditions():
+    """Retourne la liste des conditions avec conseils statiques disponibles"""
+    conditions = []
+    for key, value in STATIC_ADVICE.items():
+        if key != "default":
+            conditions.append({
+                "name": key,
+                "description": value["description"]
+            })
+    return {"conditions": conditions, "total": len(conditions)}
+    
 
 # ===== ENDPOINTS HISTORIQUE =====
 @app.get("/history/{user_id}", response_model=List[schemas.PredictionOut])
