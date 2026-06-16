@@ -22,12 +22,6 @@ from pydantic import EmailStr
 import database, db_models, schemas, crud, auth
 from db_models import LoginRequest, AuthResponse
 
-from gemma_client import GemmaClient
-
-GEMMA_API_URL = os.getenv("GEMMA_API_URL", "http://localhost:8001")
-
-gemma_client = GemmaClient(GEMMA_API_URL)
-
 # ===== CONFIGURATION =====
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -406,17 +400,6 @@ async def send_welcome_email(user_email: str, username: str):
         print(f"❌ Erreur envoi email de bienvenue : {e}")
 
 # ===== DICTIONNAIRE DE CONSEILS STATIQUES =====
-SYSTEM_PROMPT = """
-Tu es un assistant médical éducatif spécialisé en dermatologie.
-Tu n’es pas un médecin.
-Tu n’établis aucun diagnostic médical.
-Tu expliques les résultats fournis par un modèle d’analyse d’image.
-Tu utilises un langage simple, rassurant et responsable.
-Tu indiques clairement quand consulter un professionnel de santé.
-Tu adaptes les conseils à des contextes à faibles ressources.
-Tu ne prescris jamais de médicaments.
-"""
-
 STATIC_ADVICE = {
     "chickenpox": {
         "description": "La varicelle est une infection virale très contagieuse causant des éruptions de vésicules.",
@@ -517,46 +500,6 @@ def get_static_advice(prediction: str) -> str:
     
     return formatted_advice
 
-
-def generate_gemma_advice(prediction: str, confidence: float) -> str:
-    prompt = f"""
-Un modèle d'analyse d'image cutanée suggère :
-- Affection possible : {prediction}
-- Probabilité : {confidence*100:.1f} %
-
-Explique :
-1. Ce que cela signifie
-2. Les gestes simples à faire
-3. Quand consulter un médecin
-4. Un message rassurant
-"""
-
-    response = gemma_client.generate(
-        system_prompt=SYSTEM_PROMPT,
-        user_prompt=prompt,
-        temperature=0.4,
-        max_tokens=300
-    )
-
-    return response
-
-def get_ai_advice_with_fallback(prediction: str, confidence: float) -> str:
-    try:
-        if confidence < 0.6:
-            return get_static_advice(prediction)
-
-        ai_text = generate_gemma_advice(prediction, confidence)
-
-        if not ai_text or len(ai_text) < 50:
-            return get_static_advice(prediction)
-
-        return clean_markdown_for_mobile(ai_text)
-
-    except Exception as e:
-        print("⚠️ Gemma indisponible :", e)
-        return get_static_advice(prediction)
-
-
 # ===== ENDPOINTS AUTHENTIFICATION =====
 @app.post("/users/", response_model=AuthResponse)
 async def create_user(
@@ -619,9 +562,7 @@ async def predict(
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         
         # Générer les conseils statiques
-        # final_advice = get_static_advice(prediction)
-        final_advice = get_ai_advice_with_fallback(prediction, confidence)
-
+        final_advice = get_static_advice(prediction)
         
         # Sauvegarde dans la base
         prediction_data = schemas.PredictionCreate(
