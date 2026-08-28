@@ -22,11 +22,13 @@ from pydantic import EmailStr
 import database, db_models, schemas, crud, auth
 from db_models import LoginRequest, AuthResponse
 
-from gemma_client import GemmaClient
+from ai_provider import AIProvider
+from rag import build_context
 
 GEMMA_API_URL = os.getenv("GEMMA_API_URL", "http://localhost:8001")
 
-gemma_client = GemmaClient(GEMMA_API_URL)
+# Provider IA unifié : Gemma d'abord, AIHubMix en secours.
+ai_provider = AIProvider(GEMMA_API_URL)
 
 # ===== CONFIGURATION =====
 load_dotenv()
@@ -405,6 +407,117 @@ async def send_welcome_email(user_email: str, username: str):
     except Exception as e:
         print(f"❌ Erreur envoi email de bienvenue : {e}")
 
+def get_otp_email_template(username: str, otp_code: str) -> str:
+    """Template HTML pour l'envoi du code OTP"""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #f4f4f4;
+            }}
+            .container {{
+                background: white;
+                border-radius: 10px;
+                overflow: hidden;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            .header {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 30px;
+                text-align: center;
+            }}
+            .header h1 {{
+                margin: 0;
+                font-size: 24px;
+            }}
+            .content {{
+                padding: 30px;
+            }}
+            .otp-box {{
+                background: #f8f9fa;
+                border: 2px dashed #667eea;
+                padding: 25px;
+                border-radius: 12px;
+                text-align: center;
+                margin: 20px 0;
+            }}
+            .otp-code {{
+                font-size: 36px;
+                font-weight: bold;
+                letter-spacing: 8px;
+                color: #667eea;
+            }}
+            .warning {{
+                background: #f8d7da;
+                border-left: 4px solid #dc3545;
+                padding: 15px;
+                margin: 20px 0;
+                border-radius: 4px;
+                color: #721c24;
+            }}
+            .footer {{
+                text-align: center;
+                padding: 20px;
+                background: #f8f9fa;
+                color: #666;
+                font-size: 12px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔐 Réinitialisation de mot de passe</h1>
+            </div>
+            <div class="content">
+                <p>Bonjour <strong>{username}</strong>,</p>
+                <p>Vous avez demandé la réinitialisation de votre mot de passe SkinDetect.</p>
+                
+                <div class="otp-box">
+                    <p style="margin: 0;">Votre code de vérification :</p>
+                    <p class="otp-code">{otp_code}</p>
+                    <p style="margin: 0; color: #666; font-size: 13px;">Ce code expire dans 15 minutes.</p>
+                </div>
+                
+                <div class="warning">
+                    <strong>⚠️ Sécurité :</strong> Si vous n'êtes pas à l'origine de cette demande, ignorez cet email
+                    et ne partagez ce code avec personne.
+                </div>
+            </div>
+            <div class="footer">
+                <p><strong>SkinDetect</strong> - Détection de maladies cutanées par IA</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+async def send_otp_email(user_email: str, username: str, otp_code: str):
+    """Envoie un email contenant le code OTP"""
+    try:
+        html = get_otp_email_template(username, otp_code)
+        message = MessageSchema(
+            subject="🔐 Votre code de réinitialisation SkinDetect",
+            recipients=[user_email],
+            body=html,
+            subtype=MessageType.html
+        )
+        await fm.send_message(message)
+        print(f"✅ Email OTP envoyé à {user_email}")
+    except Exception as e:
+        print(f"❌ Erreur envoi email OTP : {e}")
+        raise
+
 # ===== DICTIONNAIRE DE CONSEILS STATIQUES =====
 SYSTEM_PROMPT = """
 Tu es un assistant médical éducatif spécialisé en dermatologie.
@@ -519,23 +632,33 @@ def get_static_advice(prediction: str) -> str:
 
 
 def generate_gemma_advice(prediction: str, confidence: float) -> str:
-    prompt = f"""
-Un modèle d'analyse d'image cutanée suggère :
+    # ===== RAG : récupérer un contexte fiable lié à la prédiction =====
+    rag_context = build_context(prediction, top_k=2)
+
+    context_block = ""
+    if rag_context:
+        context_block = f"""
+CONTEXTE MÉDICAL DE RÉFÉRENCE (généralement fiable, à reformuler avec tes propres mots) :
+{rag_context}
+
+"""
+
+    prompt = f"""{context_block}Un modèle d'analyse d'image cutanée suggère :
 - Affection possible : {prediction}
 - Probabilité : {confidence*100:.1f} %
 
-Explique :
+En t'appuyant sur le contexte fourni si disponible, explique :
 1. Ce que cela signifie
 2. Les gestes simples à faire
 3. Quand consulter un médecin
 4. Un message rassurant
 """
 
-    response = gemma_client.generate(
+    response = ai_provider.generate(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=prompt,
         temperature=0.4,
-        max_tokens=300
+        max_tokens=350
     )
 
     return response
@@ -555,6 +678,91 @@ def get_ai_advice_with_fallback(prediction: str, confidence: float) -> str:
     except Exception as e:
         print("⚠️ Gemma indisponible :", e)
         return get_static_advice(prediction)
+
+
+# ===== PROMPS CHATBOT MÉDICAL =====
+CHAT_SYSTEM_PROMPT = """
+Tu es "SkinDetect Care", un assistant médical éducatif spécialisé en dermatologie.
+Tu n'es PAS un médecin et tu n'établis AUCUN diagnostic médical.
+Lignes directrices strictes :
+1. Réponds uniquement en français, de manière simple, claire et rassurante.
+2. Ne prescris JAMAIS de médicaments, doses ou traitements.
+3. Explique les conditions cutanées courantes (varicelle, rougeole, mpox, pieds-mains-bouche, etc.) de façon éducative.
+4. Donne des mesures préventives et d'hygiène générales.
+5. Indique clairement quand consulter un professionnel de santé (fièvre élevée, difficultés respiratoires, symptômes graves).
+6. Toujours terminer par un rappel que ce n'est pas un diagnostic médical et que le patient doit consulter un médecin si inquiet.
+7. Adapte tes conseils aux contextes à faibles ressources.
+"""
+
+QUICK_CHAT_SUGGESTIONS = [
+    "Est-ce contagieux ?",
+    "Quels soins d'urgence ?",
+    "Quand consulter un médecin ?",
+    "Comment éviter la propagation ?"
+]
+
+@app.post("/chat/", response_model=schemas.ChatResponse)
+async def chat_endpoint(request: schemas.ChatRequest):
+    """
+    Endpoint chatbot médical : dialogue contextuel avec Gemma/Gemini.
+    Reçoit un historique de messages et retourne une réponse médicale encadrée.
+    """
+    try:
+        # Construction du prompt à partir de l'historique
+        if not request.messages:
+            return schemas.ChatResponse(reply="Bonjour, comment puis-je vous aider concernant votre santé cutanée ?")
+
+        convo_lines = []
+        for m in request.messages[-10:]:  # garder les 10 derniers messages
+            role = "Utilisateur" if m.role.lower() == "user" else "Assistant"
+            convo_lines.append(f"{role} : {m.content}")
+        convo_text = "\n".join(convo_lines)
+
+        # ===== RAG : récupérer un contexte lié à la dernière question =====
+        last_user_text = ""
+        for m in reversed(request.messages):
+            if m.role.lower() == "user":
+                last_user_text = m.content
+                break
+
+        rag_context = build_context(last_user_text, top_k=3)
+        context_block = ""
+        if rag_context:
+            context_block = f"""
+CONTEXTE MÉDICAL DE RÉFÉRENCE (généralement fiable, à reformuler avec tes propres mots) :
+{rag_context}
+
+"""
+
+        prompt = f"""
+{context_block}Historique de la conversation :
+{convo_text}
+
+Réponds de manière utile et éducative à la dernière question de l'utilisateur,
+en t'appuyant sur le contexte fourni si pertinent.
+"""
+
+        reply = ai_provider.generate(
+            system_prompt=CHAT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.4,
+            max_tokens=400
+        )
+
+        if not reply or len(reply) < 20:
+            reply = ("Je ne peux pas vous répondre précisément pour le moment. "
+                     "Si vous avez des symptômes inquiétants, consultez rapidement un professionnel de santé.")
+
+        reply_clean = clean_markdown_for_mobile(reply)
+        reply_clean += "\n\n⚠️ SkinDetect Care n'est pas un médecin. Consultez un professionnel de santé pour un diagnostic."
+
+        return schemas.ChatResponse(reply=reply_clean)
+
+    except Exception as e:
+        print("⚠️ Chat indisponible :", e)
+        return schemas.ChatResponse(
+            reply="L'assistant est momentanément indisponible. Pour toute urgence, contactez directement un professionnel de santé."
+        )
 
 
 # ===== ENDPOINTS AUTHENTIFICATION =====
@@ -675,6 +883,50 @@ async def send_test_email(
         "status": "success"
     }
 
+# ===== ENDPOINTS RÉINITIALISATION MOT DE PASSE =====
+@app.post("/auth/forgot-password/")
+async def forgot_password(
+    request: schemas.ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Demande un code OTP pour la réinitialisation de mot de passe"""
+    user = crud.get_user_by_email(db, request.email)
+    if not user:
+        # Ne pas révéler si l'email existe (sécurité)
+        return {"message": "Si cet email existe, un code de réinitialisation a été envoyé.", "status": "sent"}
+
+    otp_code = crud.create_reset_otp(db, user.id)
+    background_tasks.add_task(send_otp_email, user.email, user.username, otp_code)
+
+    return {"message": "Un code de réinitialisation a été envoyé par email.", "status": "sent"}
+
+@app.post("/auth/reset-password/")
+async def reset_password(
+    request: schemas.ResetPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    """Vérifie l'OTP et réinitialise le mot de passe"""
+    user = crud.get_user_by_email(db, request.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+
+    otp = crud.get_valid_otp(db, user.id, request.otp_code)
+    if not otp:
+        raise HTTPException(status_code=400, detail="Code OTP invalide, expiré ou déjà utilisé")
+
+    # Réinitialiser et invalider l'OTP
+    crud.reset_user_password(db, user.id, request.new_password)
+    crud.invalidate_otp(db, otp)
+
+    return {"message": "Mot de passe réinitialisé avec succès.", "status": "success"}
+
+# ===== ENDPOINT STATISTIQUES =====
+@app.get("/stats/summary/", response_model=schemas.StatsOverview)
+def stats_summary(db: Session = Depends(get_db)):
+    """Retourne un résumé des statistiques globales de la plateforme"""
+    return crud.get_global_stats(db)
+
 # ===== ENDPOINTS HISTORIQUE =====
 @app.get("/history/{user_id}", response_model=List[schemas.PredictionOut])
 def history(user_id: int, db: Session = Depends(get_db)):
@@ -752,10 +1004,10 @@ def keep_alive():
         try:
             url = "https://detectionbackend-hln7.onrender.com"
             if url:
-                print(f"🔄 Keep-alive ping vers {url}")
+                print(f"[Keep-alive] Ping vers {url}")
                 requests.get(url + "/health", timeout=2)
         except Exception as e:
-            print(f"⚠️ Keep-alive error: {e}")
+            print(f"[Keep-alive] Erreur: {e}")
         
         time.sleep(120)  # 2 minutes
 
