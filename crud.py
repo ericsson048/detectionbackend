@@ -7,7 +7,14 @@ import db_models, schemas, auth
 # Users
 def create_user(db: Session, user: schemas.UserCreate):
     hashed_pw = auth.hash_password(user.password)
-    db_user = db_models.User(username=user.username, email=user.email, hashed_password=hashed_pw)  # Utilise db_models
+    db_user = db_models.User(
+        username=user.username,
+        email=user.email,
+        hashed_password=hashed_pw,
+        consent_health_data=user.consent_health_data,
+        consent_at=datetime.utcnow() if user.consent_health_data else None,
+        anonymized=False,
+    )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -35,9 +42,154 @@ def create_prediction(db: Session, prediction: schemas.PredictionCreate, user_id
 def get_predictions(db: Session, user_id: int):
     return db.query(db_models.Prediction).filter(db_models.Prediction.user_id == user_id).order_by(db_models.Prediction.timestamp.desc()).all()  # Utilise db_models
 
+def get_prediction_by_id(db: Session, prediction_id: int):
+    return db.query(db_models.Prediction).filter(db_models.Prediction.id == prediction_id).first()
+
+def update_prediction_notes(db: Session, prediction_id: int, notes: str):
+    pred = get_prediction_by_id(db, prediction_id)
+    if not pred:
+        return None
+    pred.notes = notes
+    db.commit()
+    db.refresh(pred)
+    return pred
+
 def get_user_by_email(db: Session, email: str):
     """Récupère un utilisateur par son email"""
     return db.query(db_models.User).filter(db_models.User.email == email).first()
+
+# ==== Suivi d'évolution : dossiers de maladie ====
+def create_case_file(db: Session, user_id: int, data: schemas.CaseFileCreate):
+    cf = db_models.CaseFile(
+        user_id=user_id,
+        title=data.title,
+        condition=data.condition,
+        status=data.status or "stable",
+    )
+    db.add(cf)
+    db.commit()
+    db.refresh(cf)
+    return cf
+
+def get_case_files(db: Session, user_id: int):
+    return db.query(db_models.CaseFile).filter(
+        db_models.CaseFile.user_id == user_id
+    ).order_by(db_models.CaseFile.updated_at.desc()).all()
+
+def get_case_file(db: Session, case_file_id: int):
+    return db.query(db_models.CaseFile).filter(db_models.CaseFile.id == case_file_id).first()
+
+def update_case_file(db: Session, case_file_id: int, data: schemas.CaseFileUpdate):
+    cf = get_case_file(db, case_file_id)
+    if not cf:
+        return None
+    if data.title is not None:
+        cf.title = data.title
+    if data.condition is not None:
+        cf.condition = data.condition
+    if data.status is not None:
+        cf.status = data.status
+    db.commit()
+    db.refresh(cf)
+    return cf
+
+def delete_case_file(db: Session, case_file_id: int):
+    cf = get_case_file(db, case_file_id)
+    if not cf:
+        return False
+    db.delete(cf)
+    db.commit()
+    return True
+
+# ==== Rappels ====
+def create_reminder(db: Session, data: schemas.ReminderCreate):
+    r = db_models.Reminder(
+        user_id=data.user_id,
+        title=data.title,
+        message=data.message,
+        remind_at=data.remind_at,
+        frequency=data.frequency or "once",
+        status="active",
+    )
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+    return r
+
+def get_reminders(db: Session, user_id: int):
+    return db.query(db_models.Reminder).filter(
+        db_models.Reminder.user_id == user_id
+    ).order_by(db_models.Reminder.remind_at.asc()).all()
+
+def get_reminder(db: Session, reminder_id: int):
+    return db.query(db_models.Reminder).filter(db_models.Reminder.id == reminder_id).first()
+
+def update_reminder(db: Session, reminder_id: int, data: schemas.ReminderUpdate):
+    r = get_reminder(db, reminder_id)
+    if not r:
+        return None
+    if data.title is not None:
+        r.title = data.title
+    if data.message is not None:
+        r.message = data.message
+    if data.remind_at is not None:
+        r.remind_at = data.remind_at
+    if data.frequency is not None:
+        r.frequency = data.frequency
+    if data.status is not None:
+        r.status = data.status
+    db.commit()
+    db.refresh(r)
+    return r
+
+def delete_reminder(db: Session, reminder_id: int):
+    r = get_reminder(db, reminder_id)
+    if not r:
+        return False
+    db.delete(r)
+    db.commit()
+    return True
+
+def get_due_reminders(db: Session, now: datetime):
+    """Retourne les rappels actifs dont l'échéance est passée."""
+    return db.query(db_models.Reminder).filter(
+        db_models.Reminder.status == "active",
+        db_models.Reminder.remind_at <= now
+    ).all()
+
+# ==== RGPD ====
+def update_consent(db: Session, user_id: int, consent: bool):
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return None
+    user.consent_health_data = consent
+    user.consent_at = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+    return user
+
+def anonymize_user(db: Session, user_id: int):
+    """Anonymise un utilisateur : remplace données identifiantes mais garde le compte."""
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return None
+    suffix = f"anonyme_{user.id}"
+    user.username = f"utilisateur_{suffix}"
+    user.email = f"{suffix}@anonymise.skindetect"
+    user.anonymized = True
+    user.consent_health_data = False
+    db.commit()
+    db.refresh(user)
+    return user
+
+def delete_user(db: Session, user_id: int):
+    """Supprime définitivement le compte et toutes ses données (droit à l'oubli)."""
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return False
+    db.delete(user)  # cascade supprime prédictions, dossiers, rappels, OTPs
+    db.commit()
+    return True
 
 # Reset Password OTP
 def create_reset_otp(db: Session, user_id: int) -> str:

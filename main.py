@@ -24,6 +24,9 @@ from db_models import LoginRequest, AuthResponse
 
 from ai_provider import AIProvider
 from rag import build_context
+import image_quality as imgq
+import report_pdf
+import base64
 
 GEMMA_API_URL = os.getenv("GEMMA_API_URL", "http://localhost:8001")
 
@@ -518,6 +521,56 @@ async def send_otp_email(user_email: str, username: str, otp_code: str):
         print(f"❌ Erreur envoi email OTP : {e}")
         raise
 
+# ===== EMAIL DE RAPPORT PDF =====
+async def send_report_email(user_email: str, username: str, pdf_bytes: bytes):
+    """Envoie un rapport PDF par email au patient / dermatologue."""
+    try:
+        message = MessageSchema(
+            subject="📄 Votre rapport SkinDetect",
+            recipients=[user_email],
+            body=(
+                "<p>Bonjour <strong>{}</strong>,</p>"
+                "<p>Veuillez trouver ci-joint votre rapport dermatologique généré par SkinDetect.</p>"
+                "<p>Ce rapport est produit par une IA à des fins éducatives et ne remplace pas un avis médical.</p>"
+            ).format(username),
+            subtype=MessageType.html,
+            attachments=[
+                {
+                    "file": "rapport_skindetect.pdf",
+                    "data": pdf_bytes,
+                    "mimetype": "application/pdf",
+                }
+            ],
+        )
+        await fm.send_message(message)
+        print(f"✅ Rapport PDF envoyé à {user_email}")
+    except Exception as e:
+        print(f"❌ Erreur envoi rapport PDF : {e}")
+
+# ===== RAPPELS EMAIL (expéditeur) =====
+async def send_reminder_email(user_email: str, title: str, message: str | None):
+    """Envoie un email de rappel programmé."""
+    try:
+        html = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+            "<div style='font-family:Arial;max-width:600px;margin:auto;padding:20px'>"
+            "<h2 style='color:#00D2B4'>🔔 Rappel SkinDetect</h2>"
+            f"<h3 style='color:#0F172A'>{title}</h3>"
+            f"<p style='color:#333'>{message or ''}</p>"
+            "<p style='color:#888;font-size:12px'>Ce rappel est envoyé automatiquement par SkinDetect.</p>"
+            "</div></body></html>"
+        )
+        message = MessageSchema(
+            subject=f"🔔 Rappel : {title}",
+            recipients=[user_email],
+            body=html,
+            subtype=MessageType.html,
+        )
+        await fm.send_message(message)
+        print(f"✅ Rappel envoyé à {user_email} : {title}")
+    except Exception as e:
+        print(f"❌ Erreur envoi rappel email : {e}")
+
 # ===== DICTIONNAIRE DE CONSEILS STATIQUES =====
 SYSTEM_PROMPT = """
 Tu es un assistant médical éducatif spécialisé en dermatologie.
@@ -816,6 +869,7 @@ async def predict(
     confidence: float = Form(...),
     file: UploadFile = File(...),
     send_email: bool = Form(True),  # Activé par défaut
+    case_file_id: int = Form(None),  # Suivi d'évolution : dossier optionnel
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db)
 ):
@@ -837,9 +891,24 @@ async def predict(
             prediction=prediction,
             confidence=confidence,
             advice=final_advice,
-            image=contents
+            image=contents,
+            case_file_id=case_file_id
         )
         crud.create_prediction(db, prediction_data, user_id)
+
+        # Mise à jour automatique du dossier de maladie (suivi d'évolution)
+        if case_file_id:
+            case = crud.get_case_file(db, case_file_id)
+            if case:
+                if not case.condition:
+                    case.condition = prediction
+                # Statut estimé selon la confiance/gravité
+                if prediction.lower() in ["measles", "monkeypox"]:
+                    case.status = "worsening"
+                elif prediction.lower() == "healthy":
+                    if case.status != "worsening":
+                        case.status = "improvement"
+                db.commit()
         
         # Envoi d'email si activé
         if send_email and background_tasks:
@@ -940,6 +1009,255 @@ def unsynced_predictions(user_id: int, db: Session = Depends(get_db)):
         db_models.Prediction.user_id == user_id
     ).all()
 
+# ============================================================
+# ===== SUIVI D'ÉVOLUTION : DOSSIERS DE MALADIE (CASE FILES) =
+# ============================================================
+@app.post("/case-files/create/", response_model=schemas.CaseFileOut)
+def create_case_file_v2(data: schemas.CaseFileCreate, user_id: int = Form(0), db: Session = Depends(get_db)):
+    """Crée un dossier de maladie (user_id passé en Form pour compatibilité Flutter)."""
+    return crud.create_case_file(db, user_id, data)
+
+@app.post("/case-files/json/", response_model=schemas.CaseFileOut)
+def create_case_file_json(data: dict, db: Session = Depends(get_db)):
+    """Crée un dossier de maladie en JSON : {user_id, title, condition, status}."""
+    user_id = data.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id requis")
+    cf = schemas.CaseFileCreate(
+        title=data.get("title", "Lésion cutanée"),
+        condition=data.get("condition"),
+        status=data.get("status", "stable"),
+    )
+    return crud.create_case_file(db, int(user_id), cf)
+
+@app.get("/case-files/{user_id}", response_model=List[schemas.CaseFileOut])
+def get_case_files(user_id: int, db: Session = Depends(get_db)):
+    """Liste les dossiers de maladie d'un utilisateur."""
+    return crud.get_case_files(db, user_id)
+
+@app.get("/case-files/detail/{case_file_id}", response_model=schemas.CaseFileOut)
+def get_case_file_detail(case_file_id: int, db: Session = Depends(get_db)):
+    """Détail d'un dossier avec ses prédictions."""
+    cf = crud.get_case_file(db, case_file_id)
+    if not cf:
+        raise HTTPException(status_code=404, detail="Dossier introuvable")
+    return cf
+
+@app.patch("/case-files/{case_file_id}", response_model=schemas.CaseFileOut)
+def update_case_file(case_file_id: int, data: schemas.CaseFileUpdate, db: Session = Depends(get_db)):
+    """Met à jour le titre/statut d'un dossier de maladie."""
+    cf = crud.update_case_file(db, case_file_id, data)
+    if not cf:
+        raise HTTPException(status_code=404, detail="Dossier introuvable")
+    return cf
+
+@app.delete("/case-files/{case_file_id}")
+def delete_case_file(case_file_id: int, db: Session = Depends(get_db)):
+    """Supprime un dossier de maladie (et ses prédictions associées)."""
+    crud.delete_case_file(db, case_file_id)
+    return {"status": "deleted"}
+
+@app.patch("/predictions/{prediction_id}/notes", response_model=schemas.PredictionOut)
+def update_prediction_notes(prediction_id: int, data: schemas.PredictionNotesUpdate, db: Session = Depends(get_db)):
+    """Ajoute/mode des notes de suivi sur une prédiction."""
+    pred = crud.update_prediction_notes(db, prediction_id, data.notes)
+    if not pred:
+        raise HTTPException(status_code=404, detail="Prédiction introuvable")
+    return pred
+
+# ============================================================
+# ===== QUESTIONNAIRE ANANMESTIQUE + IA ======================
+# ============================================================
+@app.post("/anamnesis/", response_model=schemas.AnamnesisResponse)
+def anamnesis_endpoint(req: schemas.AnamnesisRequest, db: Session = Depends(get_db)):
+    """
+    Combine la prédiction visuelle avec un questionnaire (démangeaisons, douleur,
+    ancienneté, antécédents) pour affiner les conseils via le provider IA.
+    """
+    try:
+        q = req.questions or {}
+        itchy = q.get("itchy")
+        pain = q.get("pain")
+        duration = q.get("duration_days")
+        history = q.get("history")
+        location = q.get("location")
+
+        q_lines = []
+        q_lines.append(f"- Démangeaisons : {'oui' if itchy else 'non' if itchy is not None else 'non précisé'}")
+        q_lines.append(f"- Douleur : {'oui' if pain else 'non' if pain is not None else 'non précisé'}")
+        q_lines.append(f"- Ancienneté : {duration} jour(s) " if duration is not None else "- Ancienneté : non précisée")
+        if location:
+            q_lines.append(f"- Localisation : {location}")
+        if history:
+            q_lines.append(f"- Antécédents / contexte : {history}")
+        questionnaire_text = "\n".join(q_lines)
+
+        rag_context = build_context((req.prediction or "") + " " + (str(history) or ""), top_k=3)
+        context_block = ""
+        if rag_context:
+            context_block = f"\nCONTEXTE MÉDICAL DE RÉFÉRENCE (à reformuler) :\n{rag_context}\n"
+
+        system = (
+            "Tu es un assistant médical éducatif en dermatologie. Tu n'es pas un médecin et tu "
+            "n'établis aucun diagnostic. Réponds en français, de façon simple et rassurante. "
+            "Croise une prédiction d'analyse d'image avec les réponses du patient pour donner des "
+            "conseils personnalisés. Ne prescris jamais de médicaments."
+        )
+        prompt = (
+            f"{context_block}"
+            f"Prédiction du modèle d'image : {req.prediction} (confiance {req.confidence*100:.1f}%)\n\n"
+            f"Réponses au questionnaire anamnestique :\n{questionnaire_text}\n\n"
+            "Avec ces informations, donne des conseils personnalisés expliquant :\n"
+            "1. Ce que cela évoque\n"
+            "2. Les gestes simples à faire en tenant compte des réponses\n"
+            "3. Quand consulter un médecin\n"
+            "4. Un message rassurant"
+        )
+
+        reply = ai_provider.generate(
+            system_prompt=system,
+            user_prompt=prompt,
+            temperature=0.4,
+            max_tokens=400,
+        )
+
+        if not reply or len(reply) < 30:
+            return schemas.AnamnesisResponse(refined_advice=get_static_advice(req.prediction))
+
+        return schemas.AnamnesisResponse(refined_advice=clean_markdown_for_mobile(reply))
+    except Exception as e:
+        print("⚠️ Anamnèse indisponible :", e)
+        return schemas.AnamnesisResponse(refined_advice=get_static_advice(req.prediction))
+
+# ============================================================
+# ===== QUALITÉ D'IMAGE (côté serveur) ========================
+# ============================================================
+@app.post("/image-quality/", response_model=schemas.ImageQualityResponse)
+async def image_quality_endpoint(file: UploadFile = File(...)):
+    """Analyse la qualité d'une photo envoyée (luminosité, netteté)."""
+    contents = await file.read()
+    result = imgq.analyze_quality(contents)
+    return schemas.ImageQualityResponse(**result)
+
+# ============================================================
+# ===== RAPPORT PDF CÔTÉ SERVEUR + PARTAGE EMAIL =============
+# ============================================================
+@app.post("/report/pdf/", response_model=schemas.PdfResponse)
+async def generate_report_pdf(req: schemas.PdfRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Génère un PDF (rapport d'une prédiction ou d'un dossier complet) côté serveur."""
+    user = crud.get_user_by_id(db, req.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+
+    patient_name = user.username
+    pdf_bytes = None
+    prediction_fr = ""
+
+    if req.case_file_id:
+        cf = crud.get_case_file(db, req.case_file_id)
+        if not cf:
+            raise HTTPException(status_code=404, detail="Dossier introuvable")
+        preds = cf.predictions
+        pdf_bytes = report_pdf.build_casefile_pdf(patient_name, cf, preds)
+    elif req.prediction_id:
+        p = crud.get_prediction_by_id(db, req.prediction_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="Prédiction introuvable")
+        prediction_fr = STATIC_ADVICE.get(p.prediction.lower(), STATIC_ADVICE["default"])["description"]
+        pdf_bytes = report_pdf.build_prediction_pdf(
+            patient_name, p.prediction, prediction_fr,
+            p.confidence, p.advice, p.notes, p.timestamp
+        )
+    else:
+        # Par défaut : dernier examen
+        preds = crud.get_predictions(db, req.user_id)
+        if not preds:
+            raise HTTPException(status_code=404, detail="Aucune prédiction disponible")
+        p = preds[0]
+        prediction_fr = STATIC_ADVICE.get(p.prediction.lower(), STATIC_ADVICE["default"])["description"]
+        pdf_bytes = report_pdf.build_prediction_pdf(
+            patient_name, p.prediction, prediction_fr,
+            p.confidence, p.advice, p.notes, p.timestamp
+        )
+
+    response = schemas.PdfResponse(pdf_base64=base64.b64encode(pdf_bytes).decode())
+
+    if req.send_email_to:
+        background_tasks.add_task(send_report_email, req.send_email_to, patient_name, pdf_bytes)
+        response.emailed_to = str(req.send_email_to)
+
+    return response
+
+# ============================================================
+# ===== RAPPELS PERSONNALISÉS =================================
+# ============================================================
+@app.post("/reminders/", response_model=schemas.ReminderOut)
+def create_reminder(data: schemas.ReminderCreate, db: Session = Depends(get_db)):
+    """Crée un rappel programmé."""
+    return crud.create_reminder(db, data)
+
+@app.get("/reminders/{user_id}", response_model=List[schemas.ReminderOut])
+def get_reminders(user_id: int, db: Session = Depends(get_db)):
+    """Liste les rappels d'un utilisateur."""
+    return crud.get_reminders(db, user_id)
+
+@app.patch("/reminders/{reminder_id}", response_model=schemas.ReminderOut)
+def update_reminder(reminder_id: int, data: schemas.ReminderUpdate, db: Session = Depends(get_db)):
+    r = crud.update_reminder(db, reminder_id, data)
+    if not r:
+        raise HTTPException(status_code=404, detail="Rappel introuvable")
+    return r
+
+@app.delete("/reminders/{reminder_id}")
+def delete_reminder(reminder_id: int, db: Session = Depends(get_db)):
+    crud.delete_reminder(db, reminder_id)
+    return {"status": "deleted"}
+
+# ============================================================
+# ===== RGPD : GESTION DU CONSENTEMENT ET DES DONNÉES ========
+# ============================================================
+@app.post("/account/{user_id}/consent")
+def update_consent(user_id: int, data: schemas.ConsentUpdate, db: Session = Depends(get_db)):
+    """Définit le consentement au stockage des données de santé."""
+    user = crud.update_consent(db, user_id, data.consent_health_data)
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    return {"consent_health_data": user.consent_health_data, "consent_at": user.consent_at}
+
+@app.get("/account/{user_id}/export", response_model=schemas.ExportOut)
+def export_account(user_id: int, db: Session = Depends(get_db)):
+    """Export complet des données de l'utilisateur (droit à la portabilité)."""
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    preds = crud.get_predictions(db, user_id)
+    cfs = crud.get_case_files(db, user_id)
+    return schemas.ExportOut(
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+        consent_health_data=user.consent_health_data or False,
+        anonymized=user.anonymized or False,
+        predictions_count=len(preds),
+        case_files_count=len(cfs),
+        predictions=preds,
+        case_files=cfs,
+    )
+
+@app.post("/account/{user_id}/anonymize")
+def anonymize_account(user_id: int, db: Session = Depends(get_db)):
+    """Anonymise le compte : remplace les données identifiantes mais conserve les statistiques."""
+    user = crud.anonymize_user(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    return {"status": "anonymized", "username": user.username, "email": user.email}
+
+@app.delete("/account/{user_id}")
+def delete_account(user_id: int, db: Session = Depends(get_db)):
+    """Supprime définitivement le compte et toutes ses données (droit à l'oubli)."""
+    crud.delete_user(db, user_id)
+    return {"status": "deleted"}
+
 # ===== ENDPOINTS UTILISATEURS =====
 @app.get("/users/{user_id}", response_model=schemas.UserOut)
 def get_user(user_id: int, db: Session = Depends(get_db)):
@@ -1013,6 +1331,35 @@ def keep_alive():
 
 # Lancer le keep-alive dans un thread séparé
 threading.Thread(target=keep_alive, daemon=True).start()
+
+# ===== SCHEDULER RAPPELS =====
+import asyncio as _asyncio
+
+def _run_reminder_loop(db_session_factory):
+    """Vérifie périodiquement les rappels arrivés à échéance et envoie les emails."""
+    while True:
+        try:
+            db = db_session_factory()
+            now = datetime.datetime.utcnow()
+            due = crud.get_due_reminders(db, now)
+            for r in due:
+                user = crud.get_user_by_id(db, r.user_id)
+                if user and user.email:
+                    _asyncio.run(send_reminder_email(user.email, r.title, r.message))
+                # Rééchelonner ou marquer comme envoyé
+                if r.frequency == "daily":
+                    r.remind_at = now + datetime.timedelta(days=1)
+                elif r.frequency == "weekly":
+                    r.remind_at = now + datetime.timedelta(weeks=1)
+                else:  # once
+                    r.status = "sent"
+                db.commit()
+            db.close()
+        except Exception as e:
+            print(f"[Rappels] Erreur: {e}")
+        time.sleep(60)  # vérifie toutes les minutes
+
+threading.Thread(target=_run_reminder_loop, args=(database.SessionLocal,), daemon=True).start()
 
 # ===== DÉMARRAGE =====
 if __name__ == "__main__":
